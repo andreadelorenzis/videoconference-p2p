@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC App</title>
+	<link rel="stylesheet" type="text/css" href="/styles.css">
+	<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" referrerpolicy="no-referrer" />
+</head>
+<body>
+	<!-- Pulsante per aggiungere un nuovo peer -->
+	<!--
+	<button id="addPeerButton">Aggiungi Peer</button>
+	-->
+	
+	<div id="roomNameDisplay" class="roomName"></div>
+	
+	<!-- Video locale fisso in basso a destra -->
+	<div id="localVideoContainer">
+	    <video id="localVideo" autoplay muted></video>
+		<div id="localUserNameLabel" class="videoLabel"></div>
+	</div>
+
+	<!-- Griglia dei video remoti -->
+	<div id="videoContainer" class="grid-container">
+	    <!-- I video degli altri peer verranno aggiunti qui -->
+	</div>
+
+	<!-- Pulsantiera per il controllo delle funzioni -->
+	<div class="controlBar">
+	    <button id="toggleCamera" class="controlButton" title="Attiva/Disattiva video">
+	        <i class="fa fa-video-camera"></i>
+	    </button>
+	    <button id="toggleMic" class="controlButton" title="Attiva/Disattiva microfono">
+	        <i class="fa fa-microphone"></i>
+	    </button>
+	    <button id="toggleScreenShare" class="controlButton" title="Condivisione schermo">
+	        <i class="fa fa-desktop"></i>
+	    </button>
+	    <button id="endCall" class="controlButton endCallButton" title="Termina chiamata">
+	        <i class="fa fa-phone"></i>
+	    </button>
+	</div>
+	
+    <script>
+		// Variabili per visualizzazione video
+		let peerCounter = 0;
+		const videoContainer = document.getElementById('videoContainer');
+		const aspectRatio = 16 / 9; 
+		
+		// Variabili per WebRTC e WebSocket
+        let localStream;
+        let remoteStream;
+        let peerConnections = {}; // mappa che contiene le connessioni ai peer
+        const signalingServerUrl = "ws://localhost:8080/ws";
+        let signalingSocket;
+		let roomName; 
+		let userName; 
+		
+		// Variabili per stato pulsanti di controllo
+		let isCameraEnabled = true;
+		let isMicEnabled = true;
+		let isScreenSharing = false;
+		let originalStream;
+		
+		// Avvia il processo di acquisizione del flusso locale e connessione
+        initializeConnection();
+		
+		function initializeConnection() {
+			try {
+				roomName = prompt("Inserisci il nome della stanza a cui vuoi collegarti:");
+				if (!roomName) {
+				    alert("Il nome della stanza è obbligatorio.");
+				    return;
+				}
+				userName = prompt("Inserisci il tuo nome utente:");
+	            if (!userName) {
+	                alert("Il nome utente è obbligatorio.");
+	                return;
+	            }
+                document.getElementById('roomNameDisplay').innerText = `Stanza: ${roomName}`;
+				document.getElementById('localUserNameLabel').innerText = userName;
+				
+				signalingSocket = new WebSocket(signalingServerUrl);
+				
+				signalingSocket.onopen = () => {
+	                console.log("WebSocket connection opened.");
+					signalingSocket.send(JSON.stringify({ 
+						type: "joinRoom", 
+						room: roomName,
+						user: userName 
+					}));
+	            };
+				
+				signalingSocket.onmessage = async (message) => {
+		            const data = JSON.parse(message.data);
+					
+					console.log("Numero di peer remoti connessi: ", Object.keys(peerConnections).length);
+					
+		            switch(data.type) {
+						case "join": 
+							startLocalStreamAndMakeOffer(data.sessionIds);
+							break;
+		                case "offer":
+		                    await handleOffer(data);
+		                    break;
+		                case "answer":
+		                    handleAnswer(data);
+		                    break;
+		                case "candidate":
+		                    handleCandidate(data);
+		                    break;
+						case "disconnected":
+							handleDisconnection(data);
+							break;
+						case "error":
+							handleError(data);
+							break;
+						case "updateState":
+							handleUpdateState(data);
+							break;
+		            }
+		        };
+			} catch (error) {
+		        console.error("Errore durante la cattura del flusso locale: ", error);
+			}
+		}
+		
+		function handleError(data) {
+			if (data.message.includes("Room full")) {
+	           alert("La stanza è piena. Impossibile entrare.");
+	           window.location.href = '/roomFull'; // Reindirizza l'utente
+	       }
+		}
+		
+		async function startLocalStreamAndMakeOffer(sessionIds) {
+			try {
+				localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+				originalStream = localStream;	
+			    document.getElementById('localVideo').srcObject = localStream;
+				
+				console.log("Active sessions: ", sessionIds);
+				for (let sessionId of sessionIds) {
+					await createAndSendOffer(sessionId);
+				}
+			} catch(error) {
+				console.error("Errore durante la cattura del flusso locale: ", error);
+			}
+		}
+		
+		async function createAndSendOffer(targetSessionId) {
+			const configuration = {
+                iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+            };
+            const peerConnection = new RTCPeerConnection(configuration);
+
+            // Salva la peerConnection per future interazioni
+            peerConnections[targetSessionId] = peerConnection;
+
+            // Aggiungi i track del local stream alla peer connection
+            localStream.getTracks().forEach((track) => {
+                peerConnection.addTrack(track, localStream);
+            });
+			
+			peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+					console.log("Inviando candidato ICE a:", targetSessionId);
+                    signalingSocket.send(JSON.stringify({
+                        type: "candidate",
+                        candidate: event.candidate,
+                        to: targetSessionId
+                    }));
+                }
+            };
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            signalingSocket.send(JSON.stringify({
+                type: "offer",
+                sdp: offer.sdp,
+                to: targetSessionId,
+				user: userName,
+				videoEnabled: isCameraEnabled,
+				audioEnabled: isMicEnabled
+            }));
+		}
+		
+		async function handleOffer(data) {
+			const targetSessionId = data.from;
+			const configuration = {
+			    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+			};
+			const peerConnection = new RTCPeerConnection(configuration);
+
+			peerConnections[targetSessionId] = peerConnection;
+
+			peerConnection.onicecandidate = (event) => {
+			    if (event.candidate) {
+			        signalingSocket.send(JSON.stringify({
+			            type: "candidate",
+			            candidate: event.candidate,
+			            to: targetSessionId
+			        }));
+			    }
+			};
+
+		    if (!document.getElementById('peer-' + targetSessionId)) {
+				addRemoteVideo(targetSessionId, data.user);
+		    }
+			
+			peerConnection.ontrack = (event) => {
+			    document.getElementById('peer-' + targetSessionId).srcObject = event.streams[0];
+			};
+			
+			// Aggiorna l'interfaccia utente in base allo stato video/audio ricevuto dal peer remoto
+			const videoMutedIcon = document.getElementById(`video-muted-${targetSessionId}`);
+			const audioMutedIcon = document.getElementById(`audio-muted-${targetSessionId}`);
+			videoMutedIcon.style.display = data.videoEnabled ? 'none' : 'block';
+			audioMutedIcon.style.display = data.audioEnabled ? 'none' : 'block';
+
+			await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: data.sdp }));
+
+			localStream.getTracks().forEach((track) => {
+			    peerConnection.addTrack(track, localStream);
+			});
+
+			const answer = await peerConnection.createAnswer();
+			await peerConnection.setLocalDescription(answer);
+
+			signalingSocket.send(JSON.stringify({
+			    type: "answer",
+			    sdp: answer.sdp,
+			    to: targetSessionId,
+				user: userName,
+				videoEnabled: isCameraEnabled,
+				audioEnabled: isMicEnabled
+			}));
+		}
+		
+		async function handleAnswer(data) {
+            const peerConnection = peerConnections[data.from];
+            if (peerConnection) {
+                if (!document.getElementById('peer-' + data.from)) {
+                    addRemoteVideo(data.from, data.user);
+                }
+				
+				peerConnection.ontrack = (event) => {
+	                document.getElementById('peer-' + data.from).srcObject = event.streams[0];
+	            };
+				
+				// Aggiorna l'interfaccia utente in base allo stato video/audio ricevuto dal peer remoto
+				const videoMutedIcon = document.getElementById(`video-muted-${data.from}`);
+				const audioMutedIcon = document.getElementById(`audio-muted-${data.from}`);
+				videoMutedIcon.style.display = data.videoEnabled ? 'none' : 'block';
+				audioMutedIcon.style.display = data.audioEnabled ? 'none' : 'block';
+				
+                await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: data.sdp }));
+            }
+        }
+
+        async function handleCandidate(data) {
+            const peerConnection = peerConnections[data.from];
+            if (peerConnection) {
+                const candidate = new RTCIceCandidate(data.candidate);
+                await peerConnection.addIceCandidate(candidate);
+            }
+        }
+		
+		function handleDisconnection(data) {
+			const sessionId = data.id;
+			const peerConnection = peerConnections[sessionId];
+			if (peerConnection) {
+				peerConnection.close();
+				delete peerConnections[sessionId];
+				const videoElement = document.getElementById(`peer-container-${sessionId}`);
+				if (videoElement) {
+                    videoElement.remove();
+                }
+				updateGridLayout();
+				console.log(`Peer ${sessionId} disconnected.`);
+			}
+		}
+        
+		function handleUpdateState(data) {
+			const { from, field, enabled } = data;
+			const videoMutedIcon = document.getElementById(`video-muted-${from}`);
+			const audioMutedIcon = document.getElementById(`audio-muted-${from}`);
+			
+			console.log("from: " + from + ", field: " + field + ", enabled: " + enabled);
+			
+			if (field === "video") {
+			      videoMutedIcon.style.display = enabled ? 'none' : 'block';
+			} else if (field === "audio") {
+			      audioMutedIcon.style.display = enabled ? 'none' : 'block';
+			}
+		}
+		
+		document.getElementById('toggleCamera').addEventListener('click', () => {
+	         const button = document.getElementById('toggleCamera');
+	         isCameraEnabled = !isCameraEnabled;
+	         button.classList.toggle('disabledCamera', !isCameraEnabled);
+
+	         localStream.getVideoTracks().forEach(track => {
+	             track.enabled = isCameraEnabled;
+	         });
+			 
+			 signalingSocket.send(JSON.stringify({
+			     type: "updateState",
+			     field: "video",
+			     enabled: isCameraEnabled
+			 }));
+	     });
+		 
+		 document.getElementById('toggleMic').addEventListener('click', () => {
+		      const button = document.getElementById('toggleMic');
+		      isMicEnabled = !isMicEnabled;
+		      button.classList.toggle('disabledMic', !isMicEnabled);
+
+		      localStream.getAudioTracks().forEach(track => {
+		          track.enabled = isMicEnabled;
+		      });
+			  
+			  signalingSocket.send(JSON.stringify({
+			      type: "updateState",
+			      field: "audio",
+			      enabled: isMicEnabled
+			  }));
+		  });
+		  
+		  document.getElementById('endCall').addEventListener('click', () => {
+		  	  endCall();
+  		  });
+		  
+		  document.getElementById('toggleScreenShare').addEventListener('click', async () => {
+              const button = document.getElementById('toggleScreenShare');
+              if (!isScreenSharing) {
+                  try {
+                      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+                      replaceStream(screenStream);
+                      isScreenSharing = true;
+                      button.classList.add('sharingScreen');
+                  } catch (error) {
+                      console.error('Errore durante la condivisione dello schermo:', error);
+                  }
+              } else {
+                  replaceStream(originalStream);
+                  isScreenSharing = false;
+                  button.classList.remove('sharingScreen');
+              }
+          });
+		  
+		  function replaceStream(newStream) {
+		      for (const pc of Object.values(peerConnections)) {
+		          const senders = pc.getSenders();
+		          const videoTrack = newStream.getVideoTracks()[0];
+
+		          if (videoTrack) {
+		              const sender = senders.find(s => s.track.kind === 'video');
+		              if (sender) sender.replaceTrack(videoTrack);
+		          }
+		      }
+
+		      localStream = newStream;
+		      document.getElementById('localVideo').srcObject = localStream;
+		  }
+		
+		  function endCall() {
+		      // Chiude tutte le connessioni peer
+		      for (const pc of Object.values(peerConnections)) {
+		          pc.close();
+		      }
+
+		      // Ferma tutti i flussi multimediali locali
+		      if (localStream) {
+		          localStream.getTracks().forEach(track => track.stop());
+		      }
+
+		      // Chiude il socket di segnalazione
+		      if (signalingSocket) {
+		          signalingSocket.close();
+		      }
+
+		      // Reindirizza l'utente alla pagina home
+		      window.location.href = '/endCall';
+		  }
+		  
+		// Funzione per aggiungere un nuovo peer simulato
+		/*
+	    function addFakePeer() {
+	        const videoContainer = document.getElementById('videoContainer');
+	        const videoElement = document.createElement('div');
+	        videoElement.className = 'videoPlaceholder';
+	        videoElement.innerText = 'Peer ' + (++peerCounter);
+	        videoContainer.appendChild(videoElement);
+			updateGridLayout();
+	    }
+		
+		// Aggiungi un event listener al pulsante per aggiungere un nuovo peer
+		document.getElementById('addPeerButton').addEventListener('click', addFakePeer);
+		*/
+		
+		// Funzione per calcolare il numero di righe e colonne
+	    function calculateGridDimensions(peerCount) {
+	        let columns = Math.ceil(Math.sqrt(peerCount));
+	        let rows = Math.ceil(peerCount / columns);
+	        return { columns, rows };
+	    }
+		
+		// Funzione per calcolare la dimensione ottimale dei riquadri
+		function calculateOptimalSize(containerWidth, containerHeight, peerCount, gapSize) {
+		    let columns = Math.ceil(Math.sqrt(peerCount));
+		    let rows = Math.ceil(peerCount / columns);
+
+		    // Sottrai il gap dal calcolo dello spazio disponibile
+		    containerWidth -= (columns - 1) * gapSize;
+		    containerHeight -= (rows - 1) * gapSize;
+
+		    let maxWidth = containerWidth / columns;
+		    let maxHeight = containerHeight / rows;
+
+		    if (maxWidth / aspectRatio <= maxHeight) {
+		        return { width: maxWidth, height: maxWidth / aspectRatio };
+		    } else {
+		        return { width: maxHeight * aspectRatio, height: maxHeight };
+		    }
+		}
+		
+		// Funzione per aggiornare il layout della griglia
+	    function updateGridLayout() {
+			const gapSize = 10; 
+			const containerWidth = window.innerWidth - 40;
+		    const containerHeight = window.innerHeight - 40;
+			
+			const peerCount = Object.keys(peerConnections).length;
+			
+		    const { width, height } = calculateOptimalSize(containerWidth, containerHeight, peerCount, gapSize);
+
+			const columns = Math.floor(containerWidth / (width));
+			const rows = Math.ceil(peerCount / columns);
+			
+			videoContainer.style.gridTemplateColumns = `repeat(${columns}, ${width}px)`;
+			videoContainer.style.gridTemplateRows = `repeat(${rows}, ${height}px)`;
+			videoContainer.style.gap = `${gapSize}px`;
+	    }
+		
+
+		function addRemoteVideo(sessionId, userName) {
+			const videoContainer = document.getElementById('videoContainer');
+			
+			// Crea il contenitore del video
+			const videoWrapper = document.createElement('div');
+			videoWrapper.className = 'videoWrapper';
+			videoWrapper.id = `peer-container-${sessionId}`;
+			
+			// Crea l'elemento video
+			const videoElement = document.createElement('video');
+			videoElement.className = 'videoPlaceholder';
+			videoElement.id = `peer-${sessionId}`;
+			videoElement.autoplay = true;
+			videoElement.muted = false;
+			videoWrapper.appendChild(videoElement);
+			
+			// Crea l'etichetta con il session ID
+			const label = document.createElement('div');
+			label.className = 'videoLabel';
+			label.innerText = userName;
+			videoWrapper.appendChild(label);
+
+			const statusContainer = document.createElement('div');
+			statusContainer.className = 'statusContainer';
+			videoWrapper.appendChild(statusContainer);
+			
+			// Crea icone di stato per video e audio
+			const videoMutedIcon = document.createElement('i');
+			videoMutedIcon.className = 'fa fa-video-slash statusIcon';
+			videoMutedIcon.id = `video-muted-${sessionId}`;
+			videoMutedIcon.style.display = 'none'; 
+			statusContainer.appendChild(videoMutedIcon);
+			
+			const audioMutedIcon = document.createElement('i');
+			audioMutedIcon.className = 'fa fa-microphone-slash statusIcon';
+			audioMutedIcon.id = `audio-muted-${sessionId}`;
+			audioMutedIcon.style.display = 'none'; 
+			statusContainer.appendChild(audioMutedIcon);
+			
+			videoContainer.appendChild(videoWrapper);
+			
+			updateGridLayout();
+		}
+		
+    </script>
+</body>
+</html>
