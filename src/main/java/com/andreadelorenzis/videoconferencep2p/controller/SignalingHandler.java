@@ -36,9 +36,11 @@ public class SignalingHandler extends TextWebSocketHandler {
         if ("joinRoom".equals(messageType)) {
         	String roomName = jsonMessage.get("room").asText();
         	joinRoom(session, roomName);
-        } else if ("offer".equals(messageType)  ||
-        		   "answer".equals(messageType) ||
-        		   "candidate".equals(messageType)) {
+        } else if ("offer".equals(messageType)    		  ||
+        		   "answer".equals(messageType)    		  ||
+        		   "candidate".equals(messageType) 		  ||
+        		   "adminUpdateState".equals(messageType) ||
+        		   "adminRemovePeer".equals(messageType)) {
         	String roomName = (String) session.getAttributes().get("room");
         	String targetPeerId = jsonMessage.get("to").asText();
     	    Map<String, WebSocketSession> roomSessions = rooms.get(roomName);
@@ -70,6 +72,9 @@ public class SignalingHandler extends TextWebSocketHandler {
     	rooms.putIfAbsent(roomName, new HashMap<>());
     	Map<String, WebSocketSession> roomSessions = rooms.get(roomName);
     	
+    	boolean isAdmin = roomSessions.isEmpty();
+    	session.getAttributes().put("isAdmin", isAdmin);
+    	
     	if (roomSessions.size() >= MAX_USERS_PER_ROOM) {
             ObjectNode errorMessage = objectMapper.createObjectNode();
             errorMessage.put("type", "error");
@@ -87,6 +92,7 @@ public class SignalingHandler extends TextWebSocketHandler {
     	
     	Map<String, Object> message = new HashMap<>();
     	message.put("type", "join");
+    	message.put("isAdmin", isAdmin);
     	message.put("sessionIds", activeSessionIds);
     	session.sendMessage(new TextMessage(objectMapper.writeValueAsString(message)));
     }
