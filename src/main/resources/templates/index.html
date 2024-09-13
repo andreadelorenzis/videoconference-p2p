@@ -52,7 +52,8 @@
         let localStream;
         let remoteStream;
         let peerConnections = {}; // mappa che contiene le connessioni ai peer
-        const signalingServerUrl = "ws://localhost:8080/ws";
+        // const signalingServerUrl = "ws://localhost:8080/ws";
+		const signalingServerUrl = "ws://192.168.1.4:8080/ws";
         let signalingSocket;
 		let roomName; 
 		let userName; 
@@ -142,17 +143,21 @@
 		}
 		
 		async function startLocalStreamAndMakeOffer(sessionIds) {
-			try {
-				localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-				originalStream = localStream;	
-			    document.getElementById('localVideo').srcObject = localStream;
-				
-				console.log("Active sessions: ", sessionIds);
-				for (let sessionId of sessionIds) {
-					await createAndSendOffer(sessionId);
+			if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+				try {
+					localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+					originalStream = localStream;	
+				    document.getElementById('localVideo').srcObject = localStream;
+					
+					console.log("Active sessions: ", sessionIds);
+					for (let sessionId of sessionIds) {
+						await createAndSendOffer(sessionId);
+					}
+				} catch(error) {
+					console.error("Errore durante la cattura del flusso locale: ", error);
 				}
-			} catch(error) {
-				console.error("Errore durante la cattura del flusso locale: ", error);
+			} else {
+				console.error("Il browser non supporta navigator.mediaDevices");
 			}
 		}
 		
