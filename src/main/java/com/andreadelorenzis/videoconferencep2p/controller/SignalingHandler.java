@@ -21,7 +21,7 @@ public class SignalingHandler extends TextWebSocketHandler {
     
     private ObjectMapper objectMapper = new ObjectMapper();
     
-    private static final int MAX_USERS_PER_ROOM = 3;
+    private static final int MAX_USERS_PER_ROOM = 4;
 
     @Override
     public void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
